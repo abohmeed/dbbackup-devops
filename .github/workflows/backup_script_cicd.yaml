@@ -1,0 +1,109 @@
+name: CI/CD Pipeline for MySQL Backup Script
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+env: 
+  DB_HOST: "127.0.0.1"
+  DB_USER: "root"
+  MYSQL_PWD: "password"
+  DB_NAME: "mydatabase"
+
+jobs:
+  test:
+    name: Run BATS Tests
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:latest
+        env:
+          MYSQL_ROOT_PASSWORD: password
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+        ports:
+          - 3306:3306
+
+    steps:
+      # Step 1: Checkout the repository
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Install BATS and MySQL client
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats mysql-client
+
+      - name: Create backups directory
+        run: mkdir -p backups
+
+        # Step 3: Wait for MySQL service to be ready
+      - name: Wait for MySQL to be ready
+        run: |
+          for i in {1..30}; do
+            if mysqladmin ping -h 127.0.0.1 --silent; then
+              echo "MySQL is ready!"
+              break
+            fi
+            echo "Waiting for MySQL..."
+            sleep 5
+          done
+
+      # Step 4: Seed the database using the SQL script
+      - name: Seed database
+        run: mysql -h 127.0.0.1 -u root -ppassword < seed.sql
+
+      # Step 5: Run the BATS tests
+      - name: Run BATS tests
+        run: bats test.bats
+
+  build:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      # Step 1: Checkout the repository
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Step 3: Log in to Docker Hub
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Step 4: Get commit hash and semantic version for tagging
+      - name: Set up tags for Docker image
+        id: vars
+        run: |
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          echo "COMMIT_HASH=${COMMIT_HASH}" >> $GITHUB_ENV
+
+          # Extract version from git tags (fallback to 0.1.0 if no tags are available)
+          TAG_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.1.0")
+          echo "TAG_VERSION=${TAG_VERSION}" >> $GITHUB_ENV
+
+      # Step 5: Build and tag the Docker image
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/mysql-backup:${{ env.TAG_VERSION }} -t ${{ secrets.DOCKER_USERNAME }}/mysql-backup:${{ env.COMMIT_HASH }} .
+
+      # Step 6: Push the Docker image to Docker Hub
+      - name: Push Docker image
+        run: |
+          docker push ${{ secrets.DOCKER_USERNAME }}/mysql-backup:${{ env.TAG_VERSION }}
+          docker push ${{ secrets.DOCKER_USERNAME }}/mysql-backup:${{ env.COMMIT_HASH }}
