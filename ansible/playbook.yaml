@@ -1,0 +1,59 @@
+---
+- name: MySQL and Docker setup
+  hosts: all
+  become: true
+  vars:
+    db_root_password: "{{ lookup('env', 'MYSQL_ROOT_PASSWORD') }}"
+    docker_username: "{{ lookup('env', 'DOCKER_USERNAME') }}"
+    tag_version: "{{ lookup('env', 'TAG_VERSION') }}"
+    docker_image: "{{ docker_username }}/mysql-backup:{{ tag_version }}"
+    backups_path: "./backups"
+    db_name: "{{ lookup('env', 'DB_NAME') }}"
+
+  roles:
+    - role: geerlingguy.docker
+    - role: geerlingguy.mysql
+      vars:
+        mysql_root_password: "{{ db_root_password }}"
+        mysql_databases:
+          - name: "mydatabase"
+  tasks:
+    - name: Install prerequisites
+      ansible.builtin.apt:
+        name:
+          - mysql-client
+          - python3-pymysql
+        state: present
+        update_cache: true
+
+    - name: Ensure the backups directory exists
+      ansible.builtin.file:
+        path: "{{ backups_path }}"
+        state: directory
+        mode: '0755'
+    - name: Copy seed.sql to the target machine
+      ansible.builtin.copy:
+        src: "../seed.sql"
+        dest: /tmp/seed.sql
+
+    - name: Seed the database with seed.sql
+      ansible.builtin.shell: |
+        mysql < /tmp/seed.sql
+
+    - name: Run Docker container with custom options
+      community.docker.docker_container:
+        name: mysql-backup-container
+        image: "{{ docker_image }}"
+        state: started
+        network_mode: host
+        volumes:
+          - "{{ backups_path }}:/usr/src/app/backups"
+        env:
+          DB_HOST: "127.0.0.1"
+          DB_USER: "root"
+          DB_PASSWORD: "{{ db_root_password }}"
+          DB_NAME: "mydatabase"
+        command: "/usr/bin/bats test.bats"
+        tty: true
+        interactive: true
+        pull: true
